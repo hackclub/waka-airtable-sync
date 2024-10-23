@@ -21,6 +21,20 @@ let updateBatch = [];
 // Initialize a flag to track Airtable errors
 let airtableErrorOccurred = false;
 
+// Function to sanitize and serialize array fields
+function sanitizeAndSerialize(array) {
+    if (Array.isArray(array)) {
+        // Filter out items that are empty strings, null, undefined, or contain only '|'
+        const filtered = array.filter(item => 
+            item && 
+            item.trim() !== '' && 
+            item.replace(/\|/g, '').trim() !== ''
+        );
+        return filtered.length > 0 ? JSON.stringify(filtered, null, 2) : null;
+    }
+    return null;
+}
+
 // Function to process records in batches
 async function processRecords() {
     const client = new Client({
@@ -88,10 +102,12 @@ async function processRecords() {
             const records = res.rows;
             console.log(`Fetched ${records.length} records.`);
 
-            if (records.length === 0) {
+            if (records.length < limit) {  
                 console.log('No more records to process. Exiting loop.');
                 hasMore = false;
-            } else {
+            }
+
+            if (records.length > 0) {
                 for (const record of records) {
                     const userId = record.id; // users.id from SQL
                     const userEmail = record.email; // users.email from SQL
@@ -102,7 +118,7 @@ async function processRecords() {
                         // Look up the user in Airtable by slack_id
                         console.log(`Looking up Airtable record by slack_id: ${userId}`);
                         let airtableRecords = await base(airtableTableName).select({
-                            filterByFormula: `{slack_id} = '${userId}'`,
+                            filterByFormula: `{slack_id} = '${userId.replace(/'/g, "''")}'`,
                             maxRecords: 1
                         }).firstPage();
 
@@ -110,7 +126,7 @@ async function processRecords() {
                             console.log(`No record found with slack_id: ${userId}. Attempting to search by email.`);
                             // If not found, fall back to email
                             airtableRecords = await base(airtableTableName).select({
-                                filterByFormula: `{email} = '${userEmail}'`,
+                                filterByFormula: `{email} = '${userEmail.replace(/'/g, "''")}'`,
                                 maxRecords: 1
                             }).firstPage();
                         }
@@ -127,18 +143,18 @@ async function processRecords() {
                         // Prepare data to update
                         const updateData = {
                             'waka_last_synced_from_db': new Date().toISOString(),
-                            'waka_first_heartbeat': record.first_heartbeat,
-                            'waka_last_heartbeat': record.last_heartbeat,
-                            'waka_known_machine_count': Number(record.known_machine_count),
-                            'waka_known_machines': JSON.stringify(record.known_machines, null, 2),
-                            'waka_30_day_active_machine_count': Number(record["30_day_active_machine_count"]),
-                            'waka_30_day_active_machines': JSON.stringify(record["30_day_active_machines"], null, 2),
-                            'waka_known_installation_count': Number(record.known_installation_count),
-                            'waka_known_installations': JSON.stringify(record.known_installations, null, 2),
-                            'waka_30_day_active_installation_count': Number(record["30_day_active_installation_count"]),
-                            'waka_30_day_active_installations': JSON.stringify(record["30_day_active_installations"], null, 2),
-                            'waka_total_hours_logged': Number(record.total_hours_logged),
-                            'waka_30_day_hours_logged': Number(record["30_day_hours_logged"]),
+                            'waka_first_heartbeat': record.first_heartbeat || null,
+                            'waka_last_heartbeat': record.last_heartbeat || null,
+                            'waka_known_machine_count': Number(record.known_machine_count) === 0 ? null : Number(record.known_machine_count),
+                            'waka_known_machines': sanitizeAndSerialize(record.known_machines),
+                            'waka_30_day_active_machine_count': Number(record["30_day_active_machine_count"]) === 0 ? null : Number(record["30_day_active_machine_count"]),
+                            'waka_30_day_active_machines': sanitizeAndSerialize(record["30_day_active_machines"]),
+                            'waka_known_installation_count': Number(record.known_installation_count) === 0 ? null : Number(record.known_installation_count),
+                            'waka_known_installations': sanitizeAndSerialize(record.known_installations),
+                            'waka_30_day_active_installation_count': Number(record["30_day_active_installation_count"]) === 0 ? null : Number(record["30_day_active_installation_count"]),
+                            'waka_30_day_active_installations': sanitizeAndSerialize(record["30_day_active_installations"]),
+                            'waka_total_hours_logged': Number(record.total_hours_logged) === 0 ? null : Number(record.total_hours_logged),
+                            'waka_30_day_hours_logged': Number(record["30_day_hours_logged"]) === 0 ? null : Number(record["30_day_hours_logged"]),
                         };
 
                         console.log(`Preparing to update Airtable record for user: ${userEmail} with data:`, updateData);
@@ -149,7 +165,7 @@ async function processRecords() {
                             fields: updateData,
                         });
 
-                        // If batch size reaches 10, send the batch update
+                        // Batch update when reaching 10 records
                         if (updateBatch.length === 10) {
                             console.log(`Updating Airtable with batch of ${updateBatch.length} records...`);
                             try {
@@ -157,9 +173,8 @@ async function processRecords() {
                                 console.log(`Batch update successful.`);
                             } catch (error) {
                                 console.error('Error during batch update:', error);
-                                airtableErrorOccurred = true; // Flag the error
+                                airtableErrorOccurred = true;
                             }
-                            // Clear the batch array
                             updateBatch = [];
                         }
 
@@ -169,8 +184,12 @@ async function processRecords() {
                         console.error(`Error processing user ${userEmail}:`, error);
                     }
                 }
-                offset += limit;
-                console.log(`Incremented offset to ${offset} for next batch.`);
+
+                // Only increment offset if the current batch was full
+                if (records.length === limit) {  
+                    offset += limit;
+                    console.log(`Incremented offset to ${offset} for next batch.`);
+                }
             }
         }
 
@@ -182,17 +201,17 @@ async function processRecords() {
                 console.log(`Final batch update successful.`);
             } catch (error) {
                 console.error('Error during final batch update:', error);
-                airtableErrorOccurred = true; // Flag the error
+                airtableErrorOccurred = true;
             }
+        }
 
-            // Determine exit status based on Airtable errors
-            if (airtableErrorOccurred) {
-                console.log('One or more Airtable errors occurred during processing.');
-                process.exit(1);
-            } else {
-                console.log('All Airtable updates completed successfully.');
-                process.exit(0);
-            }
+        // Determine exit status based on Airtable errors
+        if (airtableErrorOccurred) {
+            console.log('One or more Airtable errors occurred during processing.');
+            process.exit(1);
+        } else {
+            console.log('All Airtable updates completed successfully.');
+            process.exit(0);
         }
 
     } catch (err) {
