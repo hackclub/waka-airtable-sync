@@ -15,6 +15,9 @@ const airtableTableName = process.env.AIRTABLE_TABLE_NAME;
 
 const base = new Airtable({ apiKey: airtableApiKey }).base(airtableBaseId);
 
+// Initialize an array to hold batched updates
+let updateBatch = [];
+
 // Function to process records in batches
 async function processRecords() {
     const client = new Client({
@@ -113,8 +116,25 @@ async function processRecords() {
 
                         console.log(`Preparing to update Airtable record for user: ${userEmail} with data:`, updateData);
 
-                        // Update the record in Airtable
-                        await base(airtableTableName).update(airtableRecordId, updateData);
+                        // Add the update to the batch
+                        updateBatch.push({
+                            id: airtableRecordId,
+                            fields: updateData,
+                        });
+
+                        // If batch size reaches 10, send the batch update
+                        if (updateBatch.length === 10) {
+                            console.log(`Updating Airtable with batch of ${updateBatch.length} records...`);
+                            try {
+                                await base(airtableTableName).update(updateBatch);
+                                console.log(`Batch update successful.`);
+                            } catch (error) {
+                                console.error('Error during batch update:', error);
+                            }
+                            // Clear the batch array
+                            updateBatch = [];
+                        }
+
                         console.log(`Successfully updated Airtable record for user ${userEmail}`);
 
                     } catch (error) {
@@ -123,6 +143,17 @@ async function processRecords() {
                 }
                 offset += limit;
                 console.log(`Incremented offset to ${offset} for next batch.`);
+            }
+        }
+
+        // After processing all records, send any remaining updates
+        if (updateBatch.length > 0) {
+            console.log(`Updating Airtable with final batch of ${updateBatch.length} records...`);
+            try {
+                await base(airtableTableName).update(updateBatch);
+                console.log(`Final batch update successful.`);
+            } catch (error) {
+                console.error('Error during final batch update:', error);
             }
         }
 
