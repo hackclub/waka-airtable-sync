@@ -39,6 +39,22 @@ async function processRecords() {
         while (hasMore) {
             console.log(`Fetching records with LIMIT ${limit} OFFSET ${offset}...`);
             const res = await client.query(`
+                WITH time_logged AS (
+                    SELECT
+                        user_id,
+                        ROUND(SUM(GREATEST(1, diff)) / 3600.0, 2) as total_hours,
+                        ROUND(SUM(GREATEST(1, diff)) FILTER (WHERE time >= NOW() - INTERVAL '30 days') / 3600.0, 2) as thirty_day_hours
+                    FROM (
+                        SELECT
+                            user_id,
+                            time,
+                            EXTRACT(EPOCH FROM LEAST(time - LAG(time) OVER w, INTERVAL '2 minutes')) as diff
+                        FROM heartbeats
+                        WINDOW w AS (PARTITION BY user_id ORDER BY time)
+                    ) s
+                    WHERE diff IS NOT NULL
+                    GROUP BY user_id
+                )
                 SELECT
                     users.created_at,
                     users.id,
@@ -53,13 +69,17 @@ async function processRecords() {
                     COUNT(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) AS known_installation_count,
                     JSON_AGG(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) AS known_installations,
                     COUNT(DISTINCT CASE WHEN h.time >= NOW() - INTERVAL '30 days' THEN CONCAT(h.editor, '|', h.operating_system, '|', h.machine) END) AS "30_day_active_installation_count",
-                    JSON_AGG(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) FILTER (WHERE h.time >= NOW() - INTERVAL '30 days') AS "30_day_active_installations"
+                    JSON_AGG(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) FILTER (WHERE h.time >= NOW() - INTERVAL '30 days') AS "30_day_active_installations",
+                    COALESCE(tl.total_hours, 0) AS total_hours_logged,
+                    COALESCE(tl.thirty_day_hours, 0) AS "30_day_hours_logged"
                 FROM
                     users
-                JOIN
+                LEFT JOIN
                     heartbeats h ON users.id = h.user_id
+                LEFT JOIN
+                    time_logged tl ON users.id = tl.user_id
                 GROUP BY
-                    users.id
+                    users.id, tl.total_hours, tl.thirty_day_hours
                 ORDER BY
                     users.created_at ASC
                 LIMIT $1 OFFSET $2;
@@ -117,6 +137,8 @@ async function processRecords() {
                             'waka_known_installations': JSON.stringify(record.known_installations, null, 2),
                             'waka_30_day_active_installation_count': Number(record["30_day_active_installation_count"]),
                             'waka_30_day_active_installations': JSON.stringify(record["30_day_active_installations"], null, 2),
+                            'waka_total_hours_logged': Number(record.total_hours_logged),
+                            'waka_30_day_hours_logged': Number(record["30_day_hours_logged"]),
                         };
 
                         console.log(`Preparing to update Airtable record for user: ${userEmail} with data:`, updateData);
