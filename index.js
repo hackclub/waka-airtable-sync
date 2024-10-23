@@ -18,6 +18,9 @@ const base = new Airtable({ apiKey: airtableApiKey }).base(airtableBaseId);
 // Initialize an array to hold batched updates
 let updateBatch = [];
 
+// Initialize a flag to track Airtable errors
+let airtableErrorOccurred = false;
+
 // Function to process records in batches
 async function processRecords() {
     const client = new Client({
@@ -130,6 +133,7 @@ async function processRecords() {
                                 console.log(`Batch update successful.`);
                             } catch (error) {
                                 console.error('Error during batch update:', error);
+                                airtableErrorOccurred = true; // Flag the error
                             }
                             // Clear the batch array
                             updateBatch = [];
@@ -154,6 +158,16 @@ async function processRecords() {
                 console.log(`Final batch update successful.`);
             } catch (error) {
                 console.error('Error during final batch update:', error);
+                airtableErrorOccurred = true; // Flag the error
+            }
+
+            // Determine exit status based on Airtable errors
+            if (airtableErrorOccurred) {
+                console.log('One or more Airtable errors occurred during processing.');
+                process.exit(1);
+            } else {
+                console.log('All Airtable updates completed successfully.');
+                process.exit(0);
             }
         }
 
