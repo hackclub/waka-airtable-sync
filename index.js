@@ -44,6 +44,7 @@ async function processRecords() {
                     users.id,
                     users.name,
                     users.email,
+                    MIN(h.time) AS first_heartbeat,
                     MAX(h.time) AS last_heartbeat,
                     COUNT(DISTINCT h.machine) AS known_machine_count,
                     JSON_AGG(DISTINCT h.machine) AS known_machines,
@@ -106,6 +107,7 @@ async function processRecords() {
                         // Prepare data to update
                         const updateData = {
                             'waka_last_synced_from_db': new Date().toISOString(),
+                            'waka_first_heartbeat': record.first_heartbeat,
                             'waka_last_heartbeat': record.last_heartbeat,
                             'waka_known_machine_count': Number(record.known_machine_count),
                             'waka_known_machines': JSON.stringify(record.known_machines, null, 2),
