@@ -50,6 +50,9 @@ async function processRecords() {
         const limit = 1000;
         let hasMore = true;
 
+        let emailHeartbeatMap = {}; // To track emails and their latest heartbeat
+        let userLookupBatch = [];   // To batch user IDs and emails for lookup
+
         while (hasMore) {
             console.log(`Fetching records with LIMIT ${limit} OFFSET ${offset}...`);
             const res = await client.query(`
@@ -111,78 +114,31 @@ async function processRecords() {
                 for (const record of records) {
                     const userId = record.id; // users.id from SQL
                     const userEmail = record.email; // users.email from SQL
+                    const lastHeartbeat = record.last_heartbeat;
 
-                    console.log(`\nProcessing user: ${userEmail} (ID: ${userId})`);
-
-                    try {
-                        // Look up the user in Airtable by slack_id
-                        console.log(`Looking up Airtable record by slack_id: ${userId}`);
-                        let airtableRecords = await base(airtableTableName).select({
-                            filterByFormula: `{slack_id} = '${userId.replace(/'/g, "''")}'`,
-                            maxRecords: 1
-                        }).firstPage();
-
-                        if (airtableRecords.length === 0) {
-                            console.log(`No record found with slack_id: ${userId}. Attempting to search by email.`);
-                            // If not found, fall back to email
-                            airtableRecords = await base(airtableTableName).select({
-                                filterByFormula: `{email} = '${userEmail.replace(/'/g, "''")}'`,
-                                maxRecords: 1
-                            }).firstPage();
-                        }
-
-                        if (airtableRecords.length === 0) {
-                            // User not found, log and skip
-                            console.warn(`User not found in Airtable for slack_id: ${userId} or email: ${userEmail}. Skipping...`);
-                            continue;
-                        }
-
-                        const airtableRecordId = airtableRecords[0].id;
-                        console.log(`Found Airtable record ID: ${airtableRecordId} for user: ${userEmail}`);
-
-                        // Prepare data to update
-                        const updateData = {
-                            'waka_last_synced_from_db': new Date().toISOString(),
-                            'waka_first_heartbeat': record.first_heartbeat || null,
-                            'waka_last_heartbeat': record.last_heartbeat || null,
-                            'waka_known_machine_count': Number(record.known_machine_count) === 0 ? null : Number(record.known_machine_count),
-                            'waka_known_machines': sanitizeAndSerialize(record.known_machines),
-                            'waka_30_day_active_machine_count': Number(record["30_day_active_machine_count"]) === 0 ? null : Number(record["30_day_active_machine_count"]),
-                            'waka_30_day_active_machines': sanitizeAndSerialize(record["30_day_active_machines"]),
-                            'waka_known_installation_count': Number(record.known_installation_count) === 0 ? null : Number(record.known_installation_count),
-                            'waka_known_installations': sanitizeAndSerialize(record.known_installations),
-                            'waka_30_day_active_installation_count': Number(record["30_day_active_installation_count"]) === 0 ? null : Number(record["30_day_active_installation_count"]),
-                            'waka_30_day_active_installations': sanitizeAndSerialize(record["30_day_active_installations"]),
-                            'waka_total_hours_logged': Number(record.total_hours_logged) === 0 ? null : Number(record.total_hours_logged),
-                            'waka_30_day_hours_logged': Number(record["30_day_hours_logged"]) === 0 ? null : Number(record["30_day_hours_logged"]),
+                    // Keep track of the latest heartbeat per email
+                    if (!emailHeartbeatMap[userEmail] || lastHeartbeat > emailHeartbeatMap[userEmail].lastHeartbeat) {
+                        emailHeartbeatMap[userEmail] = {
+                            userId,
+                            lastHeartbeat,
+                            record,
                         };
-
-                        console.log(`Preparing to update Airtable record for user: ${userEmail} with data:`, updateData);
-
-                        // Add the update to the batch
-                        updateBatch.push({
-                            id: airtableRecordId,
-                            fields: updateData,
-                        });
-
-                        // Batch update when reaching 10 records
-                        if (updateBatch.length === 10) {
-                            console.log(`Updating Airtable with batch of ${updateBatch.length} records...`);
-                            try {
-                                await base(airtableTableName).update(updateBatch);
-                                console.log(`Batch update successful.`);
-                            } catch (error) {
-                                console.error('Error during batch update:', error);
-                                airtableErrorOccurred = true;
-                            }
-                            updateBatch = [];
-                        }
-
-                        console.log(`Successfully updated Airtable record for user ${userEmail}`);
-
-                    } catch (error) {
-                        console.error(`Error processing user ${userEmail}:`, error);
                     }
+
+                    // Collect user IDs and emails for batch lookup
+                    userLookupBatch.push({ userId, userEmail });
+
+                    // If batch size reaches 10, perform lookup
+                    if (userLookupBatch.length === 10) {
+                        await lookupAndUpdateUsers(userLookupBatch, emailHeartbeatMap);
+                        userLookupBatch = [];
+                    }
+                }
+
+                // Process any remaining users in the batch
+                if (userLookupBatch.length > 0) {
+                    await lookupAndUpdateUsers(userLookupBatch, emailHeartbeatMap);
+                    userLookupBatch = [];
                 }
 
                 // Only increment offset if the current batch was full
@@ -224,3 +180,106 @@ async function processRecords() {
 }
 
 processRecords();
+
+// Function to build OR formula for Airtable filterByFormula
+function buildOrFormula(fieldName, values) {
+    const escapedValues = values.map(value => `'${value.replace(/'/g, "''")}'`);
+    const conditions = escapedValues.map(value => `{${fieldName}} = ${value}`);
+    return `OR(${conditions.join(', ')})`;
+}
+
+async function lookupAndUpdateUsers(userBatch, emailHeartbeatMap) {
+    try {
+        // Build filterByFormula using slack_id and email
+        const userIds = userBatch.map(u => u.userId);
+        const userEmails = userBatch.map(u => u.userEmail);
+
+        const slackIdFormula = buildOrFormula('slack_id', userIds);
+        const emailFormula = buildOrFormula('email', userEmails);
+
+        // Combine formulas with OR
+        const filterFormula = `OR(${slackIdFormula}, ${emailFormula})`;
+
+        // Perform Airtable lookup
+        console.log(`Looking up Airtable records for batch of users...`);
+        const airtableRecords = await base(airtableTableName).select({
+            filterByFormula: filterFormula,
+        }).all();
+
+        // Map Airtable records by slack_id and email
+        const airtableRecordMap = {};
+        airtableRecords.forEach(record => {
+            const slackId = record.get('slack_id');
+            const email = record.get('email');
+            if (slackId) {
+                airtableRecordMap[slackId] = record;
+            }
+            if (email) {
+                airtableRecordMap[email] = record;
+            }
+        });
+
+        // Prepare updates
+        for (const user of userBatch) {
+            const { userId, userEmail } = user;
+            const emailEntry = emailHeartbeatMap[userEmail];
+
+            // Skip if this is not the user with the latest heartbeat for this email
+            if (userId !== emailEntry.userId) {
+                console.log(`Skipping user ${userEmail} (ID: ${userId}) in favor of user ID: ${emailEntry.userId} with more recent heartbeat.`);
+                continue;
+            }
+
+            // Find Airtable record
+            let airtableRecord = airtableRecordMap[userId] || airtableRecordMap[userEmail];
+            if (!airtableRecord) {
+                console.warn(`User not found in Airtable for slack_id: ${userId} or email: ${userEmail}. Skipping...`);
+                continue;
+            }
+
+            const airtableRecordId = airtableRecord.id;
+            console.log(`Found Airtable record ID: ${airtableRecordId} for user: ${userEmail}`);
+
+            // Prepare data to update
+            const updateData = {
+                'waka_last_synced_from_db': new Date().toISOString(),
+                'waka_first_heartbeat': emailEntry.record.first_heartbeat || null,
+                'waka_last_heartbeat': emailEntry.record.last_heartbeat || null,
+                'waka_known_machine_count': Number(emailEntry.record.known_machine_count) === 0 ? null : Number(emailEntry.record.known_machine_count),
+                'waka_known_machines': sanitizeAndSerialize(emailEntry.record.known_machines),
+                'waka_30_day_active_machine_count': Number(emailEntry.record["30_day_active_machine_count"]) === 0 ? null : Number(emailEntry.record["30_day_active_machine_count"]),
+                'waka_30_day_active_machines': sanitizeAndSerialize(emailEntry.record["30_day_active_machines"]),
+                'waka_known_installation_count': Number(emailEntry.record.known_installation_count) === 0 ? null : Number(emailEntry.record.known_installation_count),
+                'waka_known_installations': sanitizeAndSerialize(emailEntry.record.known_installations),
+                'waka_30_day_active_installation_count': Number(emailEntry.record["30_day_active_installation_count"]) === 0 ? null : Number(emailEntry.record["30_day_active_installation_count"]),
+                'waka_30_day_active_installations': sanitizeAndSerialize(emailEntry.record["30_day_active_installations"]),
+                'waka_total_hours_logged': Number(emailEntry.record.total_hours_logged) === 0 ? null : Number(emailEntry.record.total_hours_logged),
+                'waka_30_day_hours_logged': Number(emailEntry.record["30_day_hours_logged"]) === 0 ? null : Number(emailEntry.record["30_day_hours_logged"]),
+            };
+
+            console.log(`Preparing to update Airtable record for user: ${userEmail} with data:`, updateData);
+
+            // Add the update to the batch
+            updateBatch.push({
+                id: airtableRecordId,
+                fields: updateData,
+            });
+
+            // Batch update when reaching 10 records
+            if (updateBatch.length === 10) {
+                console.log(`Updating Airtable with batch of ${updateBatch.length} records...`);
+                try {
+                    await base(airtableTableName).update(updateBatch);
+                    console.log(`Batch update successful.`);
+                } catch (error) {
+                    console.error('Error during batch update:', error);
+                    airtableErrorOccurred = true;
+                }
+                updateBatch = [];
+            }
+        }
+    } catch (error) {
+        console.error('Error during user lookup and update:', error);
+        airtableErrorOccurred = true;
+    }
+}
