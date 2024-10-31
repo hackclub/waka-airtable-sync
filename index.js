@@ -63,7 +63,12 @@ async function processRecords() {
         while (hasMore) {
             console.log(`Fetching records with LIMIT ${limit} OFFSET ${offset}...`);
             const res = await client.query(`
-                WITH time_logged AS (
+                WITH high_seas_heartbeats AS (
+                    SELECT *
+                    FROM heartbeats
+                    WHERE time >= '2024-10-29 10:00' AND time <= '2025-02-01 12:00'
+                ),
+                time_logged AS (
                     SELECT
                         user_id,
                         ROUND(SUM(GREATEST(1, diff)) / 3600.0, 2) as total_hours,
@@ -73,7 +78,7 @@ async function processRecords() {
                             user_id,
                             time,
                             EXTRACT(EPOCH FROM LEAST(time - LAG(time) OVER w, INTERVAL '2 minutes')) as diff
-                        FROM heartbeats
+                        FROM high_seas_heartbeats
                         WINDOW w AS (PARTITION BY user_id ORDER BY time)
                     ) s
                     WHERE diff IS NOT NULL
@@ -99,7 +104,7 @@ async function processRecords() {
                 FROM
                     users
                 LEFT JOIN
-                    heartbeats h ON users.id = h.user_id
+                    high_seas_heartbeats h ON users.id = h.user_id
                 LEFT JOIN
                     time_logged tl ON users.id = tl.user_id
                 GROUP BY
