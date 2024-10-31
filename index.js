@@ -54,7 +54,7 @@ async function processRecords() {
         console.log('Successfully connected to the database.');
 
         let offset = 0;
-        const limit = 1000;
+        const limit = 10000;
         let hasMore = true;
 
         let emailHeartbeatMap = {}; // To track emails and their latest heartbeat
