@@ -39,8 +39,8 @@ function sanitizeAndSerialize(array) {
 // Initialize a Map to hold batched updates, using record IDs as keys
 let updateBatch = new Map();
 
-// Initialize a flag to track Airtable errors
-let airtableErrorOccurred = false;
+// Initialize a flag to track any errors
+let errorOccurred = false;
 
 // Function to process records in batches
 async function processRecords() {
@@ -63,12 +63,7 @@ async function processRecords() {
         while (hasMore) {
             console.log(`Fetching records with LIMIT ${limit} OFFSET ${offset}...`);
             const res = await client.query(`
-                WITH high_seas_heartbeats AS (
-                    SELECT *
-                    FROM heartbeats
-                    WHERE time >= '2024-10-29 10:00' AND time <= '2025-02-01 12:00'
-                ),
-                time_logged AS (
+                WITH time_logged AS (
                     SELECT
                         user_id,
                         ROUND(SUM(GREATEST(1, diff)) / 3600.0, 2) as total_hours,
@@ -78,7 +73,7 @@ async function processRecords() {
                             user_id,
                             time,
                             EXTRACT(EPOCH FROM LEAST(time - LAG(time) OVER w, INTERVAL '2 minutes')) as diff
-                        FROM high_seas_heartbeats
+                        FROM heartbeats
                         WINDOW w AS (PARTITION BY user_id ORDER BY time)
                     ) s
                     WHERE diff IS NOT NULL
@@ -104,7 +99,7 @@ async function processRecords() {
                 FROM
                     users
                 LEFT JOIN
-                    high_seas_heartbeats h ON users.id = h.user_id
+                    heartbeats h ON users.id = h.user_id
                 LEFT JOIN
                     time_logged tl ON users.id = tl.user_id
                 GROUP BY
@@ -169,14 +164,14 @@ async function processRecords() {
                 console.log(`Final batch update successful.`);
             } catch (error) {
                 console.error('Error during final batch update:', error);
-                airtableErrorOccurred = true;
+                errorOccurred = true; // Flag the error
             }
             updateBatch.clear();
         }
 
-        // Determine exit status based on Airtable errors
-        if (airtableErrorOccurred) {
-            console.log('One or more Airtable errors occurred during processing.');
+        // Determine exit status based on any errors
+        if (errorOccurred) {
+            console.log('One or more errors occurred during processing.');
             process.exit(1);
         } else {
             console.log('All Airtable updates completed successfully.');
@@ -185,6 +180,7 @@ async function processRecords() {
 
     } catch (err) {
         console.error('Error executing query:', err.stack);
+        errorOccurred = true; // Flag the error
     } finally {
         console.log('Closing database connection.');
         await client.end();
@@ -270,7 +266,7 @@ async function lookupAndUpdateUsers(userBatch, emailHeartbeatMap) {
                 // Compare the last_heartbeat to decide which one to keep
                 const existingUpdate = updateBatch.get(airtableRecordId);
                 const existingLastHeartbeat = existingUpdate.fields['waka_last_heartbeat'];
-                if (emailRecord.last_heartbeat > existingLastHeartbeat) {
+                if (new Date(emailRecord.last_heartbeat) > new Date(existingLastHeartbeat)) {
                     // Replace the existing entry with the new one
                     console.log(`Replacing existing update for record ID ${airtableRecordId} with more recent data.`);
                     updateBatch.set(airtableRecordId, {
@@ -297,14 +293,16 @@ async function lookupAndUpdateUsers(userBatch, emailHeartbeatMap) {
                     console.log(`Batch update successful.`);
                 } catch (error) {
                     console.error('Error during batch update:', error);
-                    airtableErrorOccurred = true;
+                    errorOccurred = true; // Flag the error
                 }
                 updateBatch.clear();
             }
+
+            console.log(`Successfully updated Airtable record for user ${userEmail}`);
         }
     } catch (error) {
         console.error('Error during user lookup and update:', error);
-        airtableErrorOccurred = true;
+        errorOccurred = true; // Flag the error
     }
 }
 
