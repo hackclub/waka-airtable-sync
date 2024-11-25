@@ -54,7 +54,7 @@ async function processRecords() {
         console.log('Successfully connected to the database.');
 
         let offset = 0;
-        const limit = 1000;
+        const limit = 500;
         let hasMore = true;
 
         let emailHeartbeatMap = {}; // To track emails and their latest heartbeat
@@ -63,50 +63,79 @@ async function processRecords() {
         while (hasMore) {
             console.log(`Fetching records with LIMIT ${limit} OFFSET ${offset}...`);
             const res = await client.query(`
-                WITH time_logged AS (
-                    SELECT
-                        user_id,
-                        ROUND(SUM(GREATEST(1, diff)) / 3600.0, 2) as total_hours,
-                        ROUND(SUM(GREATEST(1, diff)) FILTER (WHERE time >= NOW() - INTERVAL '30 days') / 3600.0, 2) as thirty_day_hours
-                    FROM (
-                        SELECT
-                            user_id,
-                            time,
-                            EXTRACT(EPOCH FROM LEAST(time - LAG(time) OVER w, INTERVAL '2 minutes')) as diff
-                        FROM heartbeats
-                        WINDOW w AS (PARTITION BY user_id ORDER BY time)
-                    ) s
-                    WHERE diff IS NOT NULL
-                    GROUP BY user_id
-                )
-                SELECT
-                    users.created_at,
-                    users.id,
-                    users.name,
-                    users.email,
-                    MIN(h.time) AS first_heartbeat,
-                    MAX(h.time) AS last_heartbeat,
-                    COUNT(DISTINCT h.machine) AS known_machine_count,
-                    JSON_AGG(DISTINCT h.machine) AS known_machines,
-                    COUNT(DISTINCT CASE WHEN h.time >= NOW() - INTERVAL '30 days' THEN h.machine END) AS "30_day_active_machine_count",
-                    JSON_AGG(DISTINCT h.machine) FILTER (WHERE h.time >= NOW() - INTERVAL '30 days') AS "30_day_active_machines",
-                    COUNT(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) AS known_installation_count,
-                    JSON_AGG(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) AS known_installations,
-                    COUNT(DISTINCT CASE WHEN h.time >= NOW() - INTERVAL '30 days' THEN CONCAT(h.editor, '|', h.operating_system, '|', h.machine) END) AS "30_day_active_installation_count",
-                    JSON_AGG(DISTINCT CONCAT(h.editor, '|', h.operating_system, '|', h.machine)) FILTER (WHERE h.time >= NOW() - INTERVAL '30 days') AS "30_day_active_installations",
-                    COALESCE(tl.total_hours, 0) AS total_hours_logged,
-                    COALESCE(tl.thirty_day_hours, 0) AS "30_day_hours_logged"
-                FROM
-                    users
-                LEFT JOIN
-                    heartbeats h ON users.id = h.user_id
-                LEFT JOIN
-                    time_logged tl ON users.id = tl.user_id
-                GROUP BY
-                    users.id, tl.total_hours, tl.thirty_day_hours
-                ORDER BY
-                    users.created_at ASC
-                LIMIT $1 OFFSET $2;
+WITH selected_users AS (
+    SELECT *
+    FROM users
+    ORDER BY created_at ASC
+    LIMIT $1 OFFSET $2
+),
+high_seas_heartbeats AS (
+    SELECT *
+    FROM heartbeats
+    WHERE time >= '2024-10-29 10:00'
+      AND time <= '2025-02-01 12:00'
+      AND user_id IN (SELECT id FROM selected_users)
+),
+per_user_heartbeats AS (
+    SELECT
+        user_id,
+        MIN(time) AS first_heartbeat,
+        MAX(time) AS last_heartbeat,
+        COUNT(DISTINCT machine) AS known_machine_count,
+        JSON_AGG(DISTINCT machine) AS known_machines,
+        COUNT(DISTINCT CASE WHEN time >= NOW() - INTERVAL '30 days' THEN machine END) AS "30_day_active_machine_count",
+        JSON_AGG(DISTINCT machine) FILTER (WHERE time >= NOW() - INTERVAL '30 days') AS "30_day_active_machines",
+        COUNT(DISTINCT CONCAT(editor, '|', operating_system, '|', machine)) AS known_installation_count,
+        JSON_AGG(DISTINCT CONCAT(editor, '|', operating_system, '|', machine)) AS known_installations,
+        COUNT(DISTINCT CASE WHEN time >= NOW() - INTERVAL '30 days' THEN CONCAT(editor, '|', operating_system, '|', machine) END) AS "30_day_active_installation_count",
+        JSON_AGG(DISTINCT CONCAT(editor, '|', operating_system, '|', machine)) FILTER (WHERE time >= NOW() - INTERVAL '30 days') AS "30_day_active_installations"
+    FROM high_seas_heartbeats
+    GROUP BY user_id
+),
+time_diffs AS (
+    SELECT
+        user_id,
+        time,
+        EXTRACT(EPOCH FROM LEAST(time - LAG(time) OVER (PARTITION BY user_id ORDER BY time), INTERVAL '2 minutes')) AS diff
+    FROM high_seas_heartbeats
+),
+time_logged AS (
+    SELECT
+        user_id,
+        ROUND(SUM(GREATEST(1, diff)) / 3600.0, 2) AS total_hours,
+        ROUND(
+            SUM(GREATEST(1, diff)) FILTER (WHERE time >= NOW() - INTERVAL '30 days') / 3600.0,
+            2
+        ) AS thirty_day_hours
+    FROM time_diffs
+    WHERE diff IS NOT NULL
+    GROUP BY user_id
+)
+SELECT
+    su.created_at,
+    su.id,
+    su.name,
+    su.email,
+    pu.first_heartbeat,
+    pu.last_heartbeat,
+    pu.known_machine_count,
+    pu.known_machines,
+    pu."30_day_active_machine_count",
+    pu."30_day_active_machines",
+    pu.known_installation_count,
+    pu.known_installations,
+    pu."30_day_active_installation_count",
+    pu."30_day_active_installations",
+    COALESCE(tl.total_hours, 0) AS total_hours_logged,
+    COALESCE(tl.thirty_day_hours, 0) AS "30_day_hours_logged"
+FROM
+    selected_users su
+LEFT JOIN
+    per_user_heartbeats pu ON su.id = pu.user_id
+LEFT JOIN
+    time_logged tl ON su.id = tl.user_id
+ORDER BY
+    su.created_at ASC;
             `, [limit, offset]);
 
             const records = res.rows;
