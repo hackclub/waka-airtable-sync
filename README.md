@@ -1,3 +1,7 @@
+Moved to https://github.com/hackclub/etl-scripts.
+
+---
+
 ETL script to sync summarized data from a Wakapi installation to Airtable.
 
 Written with AI. I have a GitHub actions running in a private repo every hour. Talk to me if you need help!
